@@ -248,5 +248,107 @@ if __name__ == '__main__':
     else:
         serving = KFServing()
         serving.run()
-```#   f m i n s t  
- 
+```
+
+
+
+## pipeline 코드 작성하기
+
+```
+import kfp
+import kfp.dsl as dsl
+import kfp.onprem as onprem
+import kfp.components as comp
+
+
+    
+def echo_op(text):
+    return dsl.ContainerOp(
+        name='echo',
+        image='library/bash:4.4.23',
+        command=['sh', '-c'],
+        arguments=['echo "$0"', text],
+    )  
+
+@dsl.pipeline(
+    name='FMnistPipeline',
+    description='mnist '
+)
+def fmnist_pipeline(learning_rate, dropout_rate, epoch, act, layer,  
+                    checkpoint_dir, saved_model_dir, pvc_name, tensorboard_log,
+                    name, model_version, namespace):
+  
+    exit_task = echo_op("Done!")
+    
+    with dsl.ExitHandler(exit_task): 
+
+        kubeflow_pvc = dsl.PipelineVolume(pvc=str(pvc_name))
+        
+        mnist = dsl.ContainerOp(
+            name='FMnist',
+            image='ykkim77/fairing-job:38041ACE',
+            command=['python', '/app/fmniest_e2e.py'],
+            arguments=[
+                "--learning_rate", learning_rate,
+                "--dropout_rate", dropout_rate,
+                "--epoch", epoch,
+                "--act", act,
+                "--layer", layer,
+                "--checkpoint_dir", checkpoint_dir,
+                "--saved_model_dir", saved_model_dir,
+                "--model_version", model_version,
+                "--tensorboard_log", tensorboard_log
+            ],
+            pvolumes={"/result": kubeflow_pvc}
+        )
+        
+        result = dsl.ContainerOp(
+            name='list_list',
+            image='library/bash:4.4.23',
+            command=['ls', '-R', '/result'],
+            pvolumes={"/result": mnist.pvolume}
+        )
+        
+        kfserving = dsl.ContainerOp(
+            name='kfserving',
+            image='ykkim77/kfserving:B897A99B',
+            command=['python', '/app/serving.py'],
+            arguments=[
+                "--namespace", namespace,
+                "--storage_uri", "pvc://" +  str(pvc_name) + "/saved_model",
+                "--name", name
+            ]
+        )        
+
+        
+        inference = dsl.ContainerOp(
+            name='inference',
+            image='library/bash:4.4.23',
+            command=['curl -v -H  "Host: ${SERVICE_HOSTNAME}" http://${INGRESS_HOST}/v1/models/kfserving-fmnist:predict -d @./input.json']
+        )  
+        
+        result.after(mnist)
+        kfserving.after(result)
+        inference.after(kfserving)
+        
+    
+
+arguments = {'learning_rate': '0.001397',
+             'dropout_rate': '0.18',
+             'epoch' : '11',
+             'act' : 'sigmoid',
+             'layer': '2',
+             'checkpoint_dir': '/reuslt/training_checkpoints',
+             'saved_model_dir':'/result/saved_model/',
+             'pvc_name' : 'efs-claim',
+             'tensorboard_log': '/result/log',
+             'name' : 'kfserving-fmnist',
+             'model_version' : '0001',
+             'namespace' : 'practice'
+            }
+    
+if __name__ == '__main__':
+#     kfp.Client().create_run_from_pipeline_func(pipeline_func=fmnist_pipeline, 
+#                                                arguments=arguments)
+    kfp.compiler.Compiler().compile(fmnist_pipeline, 'fmnist.pipeline.tar.gz')
+```
